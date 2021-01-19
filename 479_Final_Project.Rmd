@@ -1,0 +1,1335 @@
+---
+title: "STAT479 Final Project: Speaker Accent Recognition" 
+author: "Fangying Zhan"
+date: "December 18, 2020"
+output:
+  pdf_document: default
+  html_document: default
+header-includes:
+- \usepackage{fancyhdr}
+- \pagestyle{fancy}
+- \fancyhf{}
+- \rhead{Zhan}
+- \lhead{STAT479 Speaker Accent Recognition}
+- \cfoot{\thepage}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(gridExtra)
+library(devtools)
+library(hrbrthemes)
+library(extrafont)
+library(cowplot)
+library(glmnet)
+library(glinternet)
+library(kableExtra)
+library(e1071)
+library(caret)
+library(lattice)
+# font_import()
+# loadfonts(device = "win")
+```
+
+
+# 1. Introduction
+
+Different accents in the same language are distinguishable to the human ear, as they are to machines. The main goal of this project is to design and train models to recognize human accents. Unlike the human ear, which receives sound signals as input, statistical models usually requires numerical or categorical data. Consequently, raw data of voices need to be transformed into numerical data for models and algorithms. Mel-Frequency Cepstral Coefficient (MFCC) is one of the algorithms for voice signal feature extraction. Considering humans' hearing ability, it transforms and maps the signal in hertz onto Mel-scale with a threshold. By using feature extraction via MFCC, raw signals stored in audio files can be converted into numerical data, where patterns exist and can be recognized by models and algorithms. 
+
+Following a Speaker Accent Recognition research conducted by Ma and Fokou (2015), we will build models on the *Speaker Accent Recognition* dataset. Following their suggested approach, it might be useful to not only extract the means of MFCCs, but also take standard deviations into account in predicting the US and non-US accents. Since we will also be interested in the generalization performance of the best model, the approaches will be examined when we attempt on a new dataset - *Speech Accent Archive*, which contains raw sound data that might require further transformation, exploration and assessment.
+
+### Dataset Descriptions
+
+#### UCI Dataset
+
+The first dataset is the *Speaker Accent Recognition* dataset from UCI Machine Learning Repository. The dataset contains 329 speech samples and consists of 12 explanatory variables that are obtained using MFCC on the original time domain soundtrack of reading a random word, and a response variable of 6 language accent labels.
+
+#### Kaggle Dataset
+
+The second dataset is the *Speech Accent Archive* data from Kaggle, which contains 2140 speech samples of different talkers reading the same passage. The raw data still requires further processing steps to match the format of explanatory variables as in the UCI dataset. A response variable is already clear, as all names of 214 different native languages of the speakers are known. Besides, demographic information such as age, gender and birthplace are also recorded.
+
+According to the relevant research conducted by Ma and Fokou (2015), in which the UCI dataset is mainly involved, the explanatory variables are mean values of 12 MFCCs. They also claimed that in practice, the first 13 MFCCs are usually computed. However, the reason why 12 instead of 13 MFCCs are included in this dataset is unclear. Since the UCI dataset also includes 10 samples of soundtrack for reference, it is possible for us to check that the 12 MFCCs included in the dataset are actually MFCCs from cepstrum #2 to #13, i.e., the #1 MFCC is excluded in this dataset. Even though the specific reason for choosing #2 to #13 MFCCs remains unknown, we can still explore the implications of this dataset, and also explore the Kaggle dataset following the same or a similar approach.
+
+### Data Preprocessing & Exploratory Data Analysis (EDA)
+
+#### Feature Extraction
+
+As discussed above, feature extraction via MFCCs is needed for preprocessing the Kaggle dataset. Means and standard deviations are computed for each of MFCC spectra (#1-#13). For the Kaggle dataset, we label them as feature variables ${X1.mean, ..., X13.mean, X1.sd, ..., X13.sd}$, whereas for the filtered version, we label means of #2-#13 as ${X1,...,X12}$ to match the format of the UCI dataset.
+
+#### Encoding Response y
+
+Since there are 6 accent class labels in the UCI dataset, which only has a small sample size of 329, and there are 214 accent class labels in the Kaggle dataset, which has a sample size of 2140, it is more convenient if we start from considering fewer classes. In this project, we would only perform binary classification, classifying talkers into US or non-US accent.
+
+For the response variable $y$, we may naturally denote US accent as $y=1$, and non-US accent as $y=0$. In the UCI dataset, $y=0$ is equivalent to the original data labels of the set {ES, FR, GE, IT, UK}, and $y=1$ is equivalent to the label {US}. In the Kaggle dataset, however, only 1 label out of 214 native language labels is equivalent to $y=1$, that is label {usa}. This would result in highly imbalanced class labels. One possible solution is to follow the UCI dataset format to filter out all class labels other than the 6 accent classes, and thus we may have a filtered version of dataset. The counts of class labels in the three datasets are as follows.
+
+```{r}
+# import datasets
+setwd("~/STAT479")
+df.uci = read.csv("acc-rec/accent-mfcc-data-1.csv")
+df.mfcc13 = read.csv("archive/mfcc_13.csv")
+df.gen = read.csv("archive/mfcc_gender.csv")
+
+# convert into binary class labels
+df.uci$accent[df.uci$language!="US"] = "non-US"
+df.uci$accent[df.uci$language=="US"] = "US"
+df.mfcc13$accent[df.mfcc13$language!="usa"] = "non-US"
+df.mfcc13$accent[df.mfcc13$language=="usa"] = "US"
+
+table.uci = table(df.uci$accent)
+table.kag = table(df.mfcc13$accent)
+
+################################
+# Kaggle dataset (filtered):
+# {ES, FR, GE, IT, UK, US}
+selected.countries = c("spain","france","germany","italy","uk","usa")
+df.filter = df.mfcc13 %>% filter(language %in% selected.countries) %>% 
+  arrange(language)
+# df.filter
+##################################
+
+table.fil = table(df.filter$accent)
+
+rbind(table.uci, table.kag, table.fil) %>% 
+  kbl(caption = "Counts in datasets") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+#### Encoding Feature X
+
+For the feature variables ${X1, ..., X12}$ in UCI dataset, which are numerical values extracted via MFCCs, distributions and pairwise scatter plots are shown as below. We may also plot for the Kaggle dataset. Other plots such as box plots and density plots for individual features are included in Appendix 2. Based on the exploratory analysis, it is clear that most of the variables are highly skewed, which is further confirmed via computing the skewness value in R. Thus, log or cubic transformation might be helpful for the data. Since data points tend to cluster, non-parametric methods might also be helpful.
+
+#### Data Transformation
+
+Skewness values can be computed for each feature variables. For highly skewed variables, log, cube root, and square transformations are performed correspondingly. Models fitted on transformed version of data will be compared with models fitted on the original version, so that we may see if data transformation steps are useful in this context.
+
+```{r, fig.width = 22, fig.height = 22}
+makePairs <- function(data) {
+  grid <- expand.grid(x = 1:ncol(data), y = 1:ncol(data))
+  grid <- subset(grid, x != y)
+  all <- do.call("rbind", lapply(1:nrow(grid), function(i) {
+    xcol <- grid[i, "x"]
+    ycol <- grid[i, "y"]
+    data.frame(xvar = names(data)[ycol], yvar = names(data)[xcol], 
+               x = data[, xcol], y = data[, ycol], data)
+  }))
+  all$xvar <- factor(all$xvar, levels = names(data))
+  all$yvar <- factor(all$yvar, levels = names(data))
+  densities <- do.call("rbind", lapply(1:ncol(data), function(i) {
+    data.frame(xvar = names(data)[i], yvar = names(data)[i], x = data[, i])
+  }))
+  list(all=all, densities=densities)
+}
+ 
+# expand iris data frame for pairs plot
+gg1 = makePairs(df.uci[,2:13])
+ 
+# new data frame mega iris
+mega_uci = data.frame(gg1$all, Accent=rep( as.factor(df.uci$accent), length=nrow(gg1$all)))
+ 
+# pairs plot
+ggplot(mega_uci, aes_string(x = "x", y = "y")) + 
+  facet_grid(xvar ~ yvar, scales = "free") + 
+  geom_point(aes(colour=Accent), na.rm = TRUE, alpha=0.5) + 
+  stat_density(aes(x = x, y = ..scaled.. * diff(range(x)) + min(x)), 
+               data = gg1$densities, position = "identity", 
+               colour = "grey20", geom = "line")
+```
+
+
+# 2. Methods
+
+### Models for classification 
+
+To solve this classification task, two methods are proposed, along with model selection techniques.
+
+#### Model I: Generalized Linear Model (GLM) & Lasso
+
+For 12 continuous features and a binary response, it is convenient to make use of GLM by specifying the binomial family. A baseline model is to include only main effects in GLM. Besides, main effects, pairwise interactions will also be attempted if it is possible to perform. To perform variable selection, Lasso regularization is a convenient choice. 
+
+#### Model II: KNN
+
+Based on the previous analysis as well as the approach suggested by Ma and Fokou (2015), non-parametric methods should also be considered in this case. A convenient choice is the k Nearest Neighbors model. For hyperparameter tuning, cross-validation is a popular method and thus will be used for tuning k.
+
+### Dataset Splitting
+
+To select from all the models described in above and to evaluate the final model, dataset needs to be split into a Train set, a Test set, and a validation set. For this project, since 8:2 is a common ratio for splitting the dataset, we first split 80% as (Train + Test) and 20% as validation set, and then split the 80% fold into 80% Train set and 20% Test set. Specifically, to maintain the distributions in each dataset, stratified splitting is employed.
+
+
+# 3. Results
+
+## Models on UCI dataset
+
+#### GLM 
+
+GLM is trained both on the original UCI training set data and the transformed version of data. In both cases, with only main effects included, only features $X1$ and $X10$ are statistically significant. The results are as follows:
+
+|                          | Training Acc. | Testing Acc. |
+| ------------------------ | ------------- | ------------ |
+| GLM (MEs)                |      77.36%   |  78.85%      |
+| GLM (MEs + transformed)  |      76.42%   |  71.15%      |
+
+Thus, GLM fitted on the original data set is preferred, with higher accuracy.
+
+An attempt is to include pairwise interaction terms into GLM. However, it is not available as the algorithm failed to converge. Thus, we continue on Lasso with the main effects.
+
+By performing Lasso regularization with 20-fold cross validation, an alpha value of 0.025 is selected. Standardization is also an option that is considered, but it does not give better results in the previous case. The best Lasso model gives the results as follows:
+
+|  GLM                       | Training Acc. | Testing Acc. |
+| -------------------------- | ------------- | ------------ |
+| Lasso (MEs)                |      75.00%   |  75.00%      |
+| Lasso (MEs + standardized) |      69.34%   |  63.46%      |
+
+Thus, Lasso method does not give a better performance than the previous GLM (MEs) model.
+
+#### KNN
+
+By performing 20-fold cross-validation, the best KNN selected is k=5. Since preprocessing techniques including centering and scaling are important for KNN, in this case, they are also performed. The model results are as follows:
+
+|  KNN                  | Training Acc. | Testing Acc. |
+| --------------------- | ------------- | ------------ |
+| 5-Nearest Neighbor    |      83.96%   |  84.62%      |
+
+### Evaluation on Validation Set
+
+Comparing the accuracy from models in above, KNN with k=5 is selected as the best model. To validate the accuracy, the model is evaluated on the validation set. The result is as follows:
+
+|  Final Model          | Validation Acc. | 95% CI           |
+| --------------------- | --------------- | ---------------- |
+| 5-Nearest Neighbor    |      83.08%     | (0.7173, 0.9124) |
+
+### Generalization Performance
+
+We are always interested in generalization performance of our trained model. In this case, since we also have another useful dataset which is from a distinct source and is originally raw data, it would be interesting if we can see the performance of the KNN model trained on full UCI dataset on some unseen data. The result is as follows:
+
+| Kaggle dataset         | Prediction Acc. | 95% CI           |
+| ---------------------- | --------------- | ---------------- |
+| UCI 5-Nearest Neighbor |      62.98%     | (0.5887, 0.6696) |
+
+It is clear that comparing to the previous validation accuracy of 83.08%, the prediction accuracy on Kaggle dataset is significantly low, which is only 62.98%. Following the same approach, we can also train and select models on the Kaggle dataset for further exploration.
+
+
+## Models on Kaggle Dataset
+
+### Predicting Accent
+
+Using the same approach as above, we can also train different models and select from them. In this case, we use the filtered Kaggle dataset, which has 570 observations after cleaning and transforming the data. Again, we are interested in predicting the accent of speakers. Following Ma and Fokou's suggestions on future work (2015), this time feature variables include not only the means of MFCCs #1-#13, but also standard deviations. Consequently, there are 26 features in total. The results of models are as follows:
+
+|                            | Training Acc. | Testing Acc. |
+| -------------------------- | ------------- | ------------ |
+| GLM (MEs)                  |     73.91%    |  70.45%      |
+| GLM (MEs + transformed)    |     74.46%    |  70.45%      |
+| Lasso (MEs)                |     74.46%    |  71.59%      |
+| Lasso (MEs + standardized) |     73.37%    |  70.45%      |
+| KNN (k=11)                 |     70.38%    |  68.18%      |
+
+Again, in this case, GLM failed to include pairwise interaction terms since the algorithm cannot converge. Selecting from the model performance above, Lasso models with main effects gives the highest testing accuracy. The result of evaluating Lasso model on validation set is as follows:
+
+|  Final Model          | Validation Acc. | 95% CI           |
+| --------------------- | --------------- | ---------------- |
+| Lasso (MEs)           |      61.40%     | (0.5183, 0.7037) |
+
+Compared with models on the UCI dataset, the models on Kaggle dataset seems to give worse performance. It could be the fact that Kaggle dataset is extracted from raw data, which contains much more noises than UCI dataset. Without any expertise in MFCCs and feature extractions, there is no way to find out the specific reasons for such bad model performance on noisy data. Yet, we may further explore the Kaggle dataset in predicting the gender of the talkers. Unlike predicting accent, predicting gender could be an easier task so that we may find out whether the Kaggle dataset is useful.
+
+### Predicting Gender
+
+Using the same approach, we can make use of the full Kaggle dataset with 2093 observations, split the data, train models and perform selections, and finally evaluate the best model. The binary gender information is also provided by the Kaggle dataset, so in this case, we may perform binary classification. 
+
+```{r}
+table.gen = table(df.gen$gender)
+
+rbind(table.gen) %>% 
+  kbl(caption = "Counts in datasets") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+
+The 26 feature variables are, again, means and standard deviations of MFCCs #1-#13. The model results are as follows:
+
+|                            | Training Acc. | Testing Acc. |
+| -------------------------- | ------------- | ------------ |
+| GLM (MEs)                  |     83.33%    |  83.13%      |
+| GLM (MEs + transformed)    |     84.30%    |  83.13%      |
+| Lasso (MEs)                |     82.81%    |  80.72%      |
+| Lasso (MEs + standardized) |     82.37%    |  81.02%      |
+| KNN (k=13)                 |     77.83%    |  76.81%      |
+
+The best model for predicting binary gender is either GLM on the original data or GLM on transformed data. Here we choose GLM with main effects on the original data, since it suffers less from overfitting. The result of evaluating GLM on validation set is as follows:
+
+|  Final Model          | Validation Acc. | 95% CI           |
+| --------------------- | --------------- | ---------------- |
+| GLM (MEs)             |      83.21%     | (0.7927, 0.8667) |
+
+Compared with previous model performance in accent predicting tasks, the model for predicting binary gender gives consistent performance and the prediction accuracy is comparatively high.
+
+
+# 4. Discussion
+
+In this project, two types of models are mainly used in the task of predicting accent of speakers given the MFCCs mean and standard deviation data: Generalized Linear Model and K-Nearest Neighbors. Lasso regularization is employed together with GLM for model selection. K-Fold Cross Validation is utilized in hyperparameter tuning. Based on the model performances, KNN performs well on predicting accent of speakers in UCI dataset, which align with the exploratory analysis where data points appear to be non-linear, so that non-parametric approaches might be useful. Lasso models do not give better performances, indicating that all features are useful in predicting speaker accent. By validating the model on an independent set of UCI data, we can confirm that the final model gives considerably stable performance.
+
+When attempting to evaluate the generalization performance of the best model on a different set of data - the Kaggle dataset, however, we see that the prediction accuracy significantly falls, which implies that it is not enough to only train models on a small dataset of 329 observations in solving the problem of accent recognition. Besides the issue of dataset size, another question that remains unsolved is that data from soundtracks can be very noisy, resulting in trained models that fail to capture the patterns. The Kaggle dataset is such an example where the task of predicting accent is much more difficult to solve. Yet, such noisy dataset is still useful in solving other tasks that might be much easier, such as predicting gender. 
+
+Based on our exploration, feature extraction appears to be a very important step in solving the problem of speaker accent recognition. Future directions should be aiming at not only making use of the means and standard deviations of MFCCs, but also extracting patterns of MFCCs. Data including only means and standard deviations are not enough in training models that can give better performance.
+
+
+
+\newpage
+
+# Appendix 1: Model Outputs
+
+## Part 1: explore UCI Dataset
+
+### UCI Dataset: predict accent
+
+#### Data transformation
+
+```{r}
+#####FIXME NO scaling##########
+# library(e1071)
+## normalization
+# z_scale = scale(df.uci[,2:13], center= TRUE, scale=TRUE)
+# df.uci.norm = data.frame(z_scale, accent=df.uci$accent)
+
+Math.cbrt <- function(x) {
+  sign(x) * abs(x)^(1/3)
+}
+
+## transformation
+# right-skewed: square root, cube root, and log
+skewness(Math.cbrt(Math.cbrt(df.uci$X3^2)))
+skewness(Math.cbrt(df.uci$X5^2))
+skewness(Math.cbrt(df.uci$X10^2))
+
+
+
+# left-skewed: square , cube root and logarithmic
+skewness(Math.cbrt(df.uci$X9))
+skewness(Math.cbrt(df.uci$X11^2))
+# 0.5 range:
+skewness(Math.cbrt(df.uci$X4^2))
+
+df.uci.tran = df.uci
+df.uci.tran$X3 = Math.cbrt(Math.cbrt(df.uci$X3^2))
+df.uci.tran$X5 = Math.cbrt(df.uci$X5^2)
+# df.uci.tran$X10 = Math.cbrt(df.uci$X10^2) ###
+df.uci.tran$X9 = Math.cbrt(df.uci$X9)
+df.uci.tran$X11 = Math.cbrt(df.uci$X11^2)
+# 0.5 range:
+# df.uci.tran$X4 = Math.cbrt(df.uci$X4^2)
+```
+
+#### splitting data: UCI dataset
+
+```{r}
+## create trans version
+set.seed(479)
+
+n = dim(df.uci)[1]
+
+# split data into training+testing & validation 8:2
+ind.trte <- createDataPartition(y = df.uci$accent,p = 0.8,list = FALSE)
+
+# split training+testing data into training & testing 8:2
+ind.tr <- createDataPartition(y = ind.trte,p = 0.8,list = FALSE)
+
+## prepare original data:
+# df.uci
+X = as.matrix(df.uci[,2:13])
+y = ifelse(df.uci[,'accent']=="US", 1, 0)
+# FIXME factor y
+y = as.factor(y)
+
+X.trte <- X[ind.trte,]
+y.trte <- y[ind.trte]
+X.valid <- X[-ind.trte,]
+y.valid <- y[-ind.trte]
+
+X.train <- X.trte[ind.tr,]
+y.train <- y.trte[ind.tr]
+X.test <- X.trte[-ind.tr,]
+y.test <- y.trte[-ind.tr]
+
+## prepare normalized + transformed data:
+# df.uci.tran
+A = as.matrix(df.uci.tran[,2:13]) ##
+
+A.trte = A[ind.trte,]
+A.valid = A[-ind.trte,]
+
+A.train = A.trte[ind.tr,]
+A.test = A.trte[-ind.tr,]
+```
+
+#### Model training
+
+```{r}
+set.seed(479)
+## original data df.uci
+X1 = X.train[,1]; X2 = X.train[,2]; X3 = X.train[,3]; X4 = X.train[,4]; X5 = X.train[,5]; X6 = X.train[,6]; X7 = X.train[,7]; X8 = X.train[,8]; X9 = X.train[,9]; X10 = X.train[,10]; X11 = X.train[,11]; X12 = X.train[,12]
+
+# df = data.frame(X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, y.train)
+
+# train.control = trainControl(method = "cv", number = 10)
+# glm.uci = train(y.train ~., data = df, method = "glm", trControl = train.control)
+
+
+glm.uci = glm(y.train ~ (X1+X2+X3+X4+X5+X6+X7+X8+X9+X10+X11+X12),
+              family="binomial")
+summary(glm.uci)
+```
+
+```{r}
+## norm+tran data df.uci.tran
+X1 = A.train[,1]; X2 = A.train[,2]; X3 = A.train[,3]; X4 = A.train[,4]; X5 = A.train[,5]; X6 = A.train[,6]; X7 = A.train[,7]; X8 = A.train[,8]; X9 = A.train[,9]; X10 = A.train[,10]; X11 = A.train[,11]; X12 = A.train[,12]
+
+glm.uci.tran = glm(y.train ~ (X1+X2+X3+X4+X5+X6+X7+X8+X9+X10+X11+X12),
+                   family="binomial")
+summary(glm.uci.tran)
+```
+
+#### Training set misclassification error
+
+```{r}
+## original
+y.fit = glm.uci$fitted.values ##
+y.fit = as.factor(as.numeric(y.fit>0.5))
+cat("UCI original data:\n")
+
+confusionMatrix(y.train, y.fit)
+```
+
+```{r}
+## transformed
+y.fit = glm.uci.tran$fitted.values ##
+y.fit = as.factor(as.numeric(y.fit>0.5))
+cat("UCI transformed data:\n")
+
+confusionMatrix(y.train, y.fit)
+```
+
+#### Performance on test set
+
+```{r}
+## original
+X1 = X.test[,1]; X2 = X.test[,2]; X3 = X.test[,3]; X4 = X.test[,4]; X5 = X.test[,5]; X6 = X.test[,6]; X7 = X.test[,7]; X8 = X.test[,8]; X9 = X.test[,9]; X10 = X.test[,10]; X11 = X.test[,11]; X12 = X.test[,12]
+
+df = data.frame(X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12)
+
+## model: glm.uci
+y.pred = predict.glm(glm.uci, df, type="response")
+
+y.pred = as.factor(as.numeric(y.pred>0.5))
+cat("UCI original data:\n")
+confusionMatrix(y.test, y.pred)
+
+##################################
+##################################
+
+## transformed
+X1 = A.test[,1]; X2 = A.test[,2]; X3 = A.test[,3]; X4 = A.test[,4]; X5 = A.test[,5]; X6 = A.test[,6]; X7 = A.test[,7]; X8 = A.test[,8]; X9 = A.test[,9]; X10 = A.test[,10]; X11 = A.test[,11]; X12 = A.test[,12]
+
+df = data.frame(X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12)
+
+## model: glm.uci.tran
+y.pred = predict.glm(glm.uci.tran, df, type="response")
+y.pred = as.factor(as.numeric(y.pred>0.5))
+cat("UCI transformed data:\n")
+
+confusionMatrix(y.test, y.pred)
+```
+
+#### LASSO selection
+
+```{r, fig.width = 6, fig.height = 4}
+set.seed(479)
+
+lambdas <- 10^seq(1, -3, by = -.05)
+#######################
+# FIXME INTs + trans data
+# cv.lasso <- glinternet.cv(A.train, y.train, numLevels=rep(1,12),
+#                           lambda = lambdas, family="binomial")
+# plot(cv.lasso)
+# (lambda_best = cv.lasso$lambdaHat)
+
+#######################
+
+# FIXME MEs
+lasso_reg <- cv.glmnet(X.train, y.train, alpha = 1, lambda = lambdas,
+                       standardize = T, nfolds = 20,
+                       family="binomial", type.measure='auc')
+plot(lasso_reg)
+(lambda_best <- lasso_reg$lambda.min)
+```
+
+### LASSO best lambda
+
+```{r}
+########################
+# FIXME INTs + trans data
+# lasso_model <- glinternet(A.train, y.train, numLevels=rep(1,12),
+#                        lambda = lambda_best, family="gaussian")
+
+########################
+# FIXME MEs:
+lasso_model <- glmnet(X.train, y.train, alpha = 1,
+                      lambda = lambda_best, standardize = T, ##FIXME
+                      family="binomial", type.measure='auc')
+########################
+
+predictions_train <- predict(lasso_model, s = lambda_best, X.train) ##newx
+y.fit = as.factor(as.numeric(predictions_train>0.5))
+confusionMatrix(y.train, y.fit)
+
+
+predictions_test <- predict(lasso_model, s = lambda_best, X.test) ##newx
+y.pred = as.factor(as.numeric(predictions_test>0.5))
+confusionMatrix(y.test, y.pred)
+
+# coef(lasso_model)
+```
+
+
+#### KNN with K-Fold CV
+
+```{r, fig.width = 6, fig.height = 4}
+set.seed(479)
+
+# ctrl <- trainControl(method="repeatedcv",repeats = 3)
+ctrl <- trainControl(method = "cv", number = 20)
+dt = data.frame(X.train, y.train=y.train)
+knnFit <- train(y.train ~ ., data=dt, method = "knn", trControl = ctrl, 
+                preProcess = c("center","scale"),  tuneLength = 20)
+# preProcess = c("center","scale")
+knnFit
+
+#Plotting different k values against accuracy (based on repeated cross validation)
+plot(knnFit)
+
+
+knnFit$finalModel
+
+confusionMatrix(knnFit)
+```
+
+#### KNN on testing set
+
+```{r}
+knnPredict <- predict(knnFit, newdata = X.test)
+confusionMatrix(knnPredict, y.test)
+```
+
+
+#### validation on best model 
+
+```{r}
+## original
+X1 = X.valid[,1]; X2 = X.valid[,2]; X3 = X.valid[,3]; X4 = X.valid[,4]; X5 = X.valid[,5]; X6 = X.valid[,6]; X7 = X.valid[,7]; X8 = X.valid[,8]; X9 = X.valid[,9]; X10 = X.valid[,10]; X11 = X.valid[,11]; X12 = X.valid[,12]
+
+
+## FIXME lasso INTs
+# y.pred = predict(lasso_model, s = lambda_best, X.valid) ##newx
+
+## model: glm.uci
+# y.pred = predict.glm(glm.uci,
+#                      data.frame(X1, X2, X3, X4, X5, X6, X7,
+#                                 X8, X9, X10, X11, X12), type="response")
+# y.pred = as.factor(as.numeric(y.pred>0.5))
+# confusionMatrix(y.valid, y.pred)
+
+##################################
+knnPredict <- predict(knnFit, newdata = X.valid)
+# Get the confusion matrix to see accuracy value and other parameter values
+confusionMatrix(knnPredict, y.valid)
+```
+
+
+
+#### Final model
+
+```{r}
+## original data df.uci
+# fit on all data (only to propose, no way to test)
+X1 = df.uci$X1; X2 = df.uci$X2; X3 = df.uci$X3; X4 = df.uci$X4; X5 = df.uci$X5; X6 = df.uci$X6; X7 = df.uci$X7; X8 = df.uci$X8; X9 = df.uci$X9; X10 = df.uci$X10; X11 = df.uci$X11; X12 = df.uci$X12
+
+# glm.uci.all = glm(y ~ X1+X2+X3+X4+X5+X6+X7+X8+X9+X10+X11+X12, family=binomial)
+# 
+# summary(glm.uci.all)
+##########################
+# final KNN:
+ctrl <- trainControl(method="repeatedcv",repeats = 3)
+dt = data.frame(X, y=as.factor(y))
+knnFit.all <- train(y ~ ., data=dt, method = "knn", trControl = ctrl, preProcess = c("center","scale"),  tuneLength = 20)
+# preProcess = c("center","scale")
+knnFit.all
+```
+
+#### Final model: generalization performance on Kaggle data
+
+```{r}
+## original
+# MFCC #2 to #13 in Kaggle data: means of X2, ..., X13
+X1 = df.filter$X2.mean; X2 = df.filter$X3.mean; X3 = df.filter$X4.mean; X4 = df.filter$X5.mean; X5 = df.filter$X6.mean; X6 = df.filter$X7.mean; X7 = df.filter$X8.mean; X8 = df.filter$X9.mean; X9 = df.filter$X10.mean; X10 = df.filter$X11.mean; X11 = df.filter$X12.mean; X12 = df.filter$X13.mean
+
+y.actual = ifelse(df.filter$accent=="US", 1, 0)
+y.actual = as.factor(y.actual)
+
+## final model: glm.uci.all
+# y.pred = predict.glm(glm.uci.all,
+#                      data.frame(X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12))
+# 
+# ## actual label
+# y.actual = ifelse(df.filter$accent=="US", 1, 0)
+# 
+# y.pred = as.numeric(y.pred>0.5)
+##################
+# final knn generalize on kaggle data
+dt = data.frame(X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12)
+knnPredict <- predict(knnFit.all, newdata = dt)
+# Get the confusion matrix to see accuracy value and other parameter values
+confusionMatrix(knnPredict, y.actual)
+```
+
+
+## Part 2: explore Kaggle dataset
+
+```{r, fig.width = 24, fig.height = 24}
+# expand iris data frame for pairs plot
+gg2 = makePairs(df.filter[,2:14])
+
+# new data frame mega iris
+mega_kag = data.frame(gg2$all, Accent=rep( as.factor(df.filter$accent), length=nrow(gg2$all)))
+
+# pairs plot
+ggplot(mega_kag, aes_string(x = "x", y = "y")) +
+  facet_grid(xvar ~ yvar, scales = "free") +
+  geom_point(aes(colour=Accent), na.rm = TRUE, alpha=0.5) +
+  stat_density(aes(x = x, y = ..scaled.. * diff(range(x)) + min(x)),
+               data = gg2$densities, position = "identity",
+               colour = "grey20", geom = "line")
+```
+
+```{r, fig.width = 24, fig.height = 24}
+# expand iris data frame for pairs plot
+gg3 = makePairs(df.filter[,15:27])
+
+# new data frame mega iris
+mega_kag = data.frame(gg3$all, Accent=rep( as.factor(df.filter$accent), length=nrow(gg3$all)))
+
+# pairs plot
+ggplot(mega_kag, aes_string(x = "x", y = "y")) +
+  facet_grid(xvar ~ yvar, scales = "free") +
+  geom_point(aes(colour=Accent), na.rm = TRUE, alpha=0.5) +
+  stat_density(aes(x = x, y = ..scaled.. * diff(range(x)) + min(x)),
+               data = gg3$densities, position = "identity",
+               colour = "grey20", geom = "line")
+```
+
+### Kaggle dataset: predict accent
+
+#### Data transformation
+
+```{r}
+# dataset: df.filter
+# variables: X1.mean, ..., X13.mean, X1.sd, ..., X13.sd
+
+## transformation
+# right-skewed: square root, cube root, and log
+skewness(log(df.filter$X1.sd))
+skewness(log(df.filter$X3.sd))
+skewness(log(df.filter$X4.sd))
+skewness(log(df.filter$X5.sd))
+skewness(log(df.filter$X6.sd))
+skewness(log(df.filter$X7.sd))
+skewness(log(df.filter$X8.sd))
+skewness(log(df.filter$X9.sd))
+skewness(log(df.filter$X10.sd))
+skewness(log(df.filter$X11.sd))
+skewness(Math.cbrt(log(df.filter$X12.sd)))
+skewness(log(df.filter$X13.sd))
+
+
+df.filter.tran = df.filter
+df.filter.tran$X1.sd = log(df.filter$X1.sd)
+df.filter.tran$X3.sd = log(df.filter$X3.sd)
+df.filter.tran$X4.sd = log(df.filter$X4.sd)
+df.filter.tran$X5.sd = log(df.filter$X5.sd)
+df.filter.tran$X6.sd = log(df.filter$X6.sd)
+df.filter.tran$X7.sd = log(df.filter$X7.sd)
+df.filter.tran$X8.sd = log(df.filter$X8.sd)
+df.filter.tran$X9.sd = log(df.filter$X9.sd)
+df.filter.tran$X10.sd = log(df.filter$X10.sd)
+df.filter.tran$X11.sd = log(df.filter$X11.sd)
+df.filter.tran$X12.sd = Math.cbrt(log(df.filter$X12.sd))
+df.filter.tran$X13.sd = log(df.filter$X13.sd)
+
+```
+
+#### Split Kaggle dataset: training, testing & validation sets
+
+```{r}
+set.seed(479)
+
+n = dim(df.filter)[1]
+
+# split data into training+testing & validation 8:2
+ind.trte <- createDataPartition(y = df.filter$accent, p = 0.8,list = FALSE)
+
+# split training+testing data into training & testing 8:2
+ind.tr <- createDataPartition(y = ind.trte, p = 0.8,list = FALSE)
+
+## prepare original data:
+# df.filter
+X = as.matrix(df.filter[,2:27])
+y = ifelse(df.filter[,'accent']=="US", 1, 0)
+y = as.factor(y)
+
+X.trte <- X[ind.trte,]
+y.trte <- y[ind.trte]
+X.valid <- X[-ind.trte,]
+y.valid <- y[-ind.trte]
+
+X.train <- X.trte[ind.tr,]
+y.train <- y.trte[ind.tr]
+X.test <- X.trte[-ind.tr,]
+y.test <- y.trte[-ind.tr]
+
+## prepare normalized + transformed data:
+# df.filter.tran
+A = as.matrix(df.filter.tran[,2:27]) ##
+
+A.trte = A[ind.trte,]
+A.valid = A[-ind.trte,]
+
+A.train = A.trte[ind.tr,]
+A.test = A.trte[-ind.tr,]
+```
+
+#### glm on training data
+
+```{r}
+## original data df.filter
+X1.mean = X.train[,1]; X2.mean = X.train[,2]; X3.mean = X.train[,3]; X4.mean = X.train[,4]; X5.mean = X.train[,5]; X6.mean = X.train[,6]; X7.mean = X.train[,7]; X8.mean = X.train[,8]; X9.mean = X.train[,9]; X10.mean = X.train[,10]; X11.mean = X.train[,11]; X12.mean = X.train[,12]; X13.mean = X.train[,13]
+
+X1.sd = X.train[,14]; X2.sd = X.train[,15]; X3.sd = X.train[,16]; X4.sd = X.train[,17]; X5.sd = X.train[,18]; X6.sd = X.train[,19]; X7.sd = X.train[,20]; X8.sd = X.train[,21]; X9.sd = X.train[,22]; X10.sd = X.train[,23]; X11.sd = X.train[,24]; X12.sd = X.train[,25]; X13.sd = X.train[,26]
+
+glm.kag = glm(y.train ~ X1.mean + X2.mean + X3.mean + X4.mean + 
+                X5.mean + X6.mean + X7.mean + X8.mean + X9.mean + 
+                X10.mean + X11.mean + X12.mean + X13.mean +
+                X1.sd + X2.sd + X3.sd + X4.sd + X5.sd + X6.sd +
+                X7.sd + X8.sd + X9.sd + X10.sd + X11.sd + X12.sd + 
+                X13.sd, family="binomial")
+summary(glm.kag)
+```
+
+```{r}
+## tran data df.uci.tran
+X1.mean = A.train[,1]; X2.mean = A.train[,2]; X3.mean = A.train[,3]; X4.mean = A.train[,4]; X5.mean = A.train[,5]; X6.mean = A.train[,6]; X7.mean = A.train[,7]; X8.mean = A.train[,8]; X9.mean = A.train[,9]; X10.mean = A.train[,10]; X11.mean = A.train[,11]; X12.mean = A.train[,12]; X13.mean = A.train[,13]
+
+X1.sd = A.train[,14]; X2.sd = A.train[,15]; X3.sd = A.train[,16]; X4.sd = A.train[,17]; X5.sd = A.train[,18]; X6.sd = A.train[,19]; X7.sd = A.train[,20]; X8.sd = A.train[,21]; X9.sd = A.train[,22]; X10.sd = A.train[,23]; X11.sd = A.train[,24]; X12.sd = A.train[,25]; X13.sd = A.train[,26]
+
+glm.kag.tran = glm(y.train ~ X1.mean + X2.mean + X3.mean + X4.mean + 
+                X5.mean + X6.mean + X7.mean + X8.mean + X9.mean + 
+                X10.mean + X11.mean + X12.mean + X13.mean +
+                X1.sd + X2.sd + X3.sd + X4.sd + X5.sd + X6.sd +
+                X7.sd + X8.sd + X9.sd + X10.sd + X11.sd + X12.sd + 
+                X13.sd, family="binomial")
+summary(glm.kag.tran)
+```
+
+#### Training set misclassification error
+
+```{r}
+## original
+y.fit = glm.kag$fitted.values ##
+y.fit = as.factor(as.numeric(y.fit>0.5))
+confusionMatrix(y.train, y.fit)
+
+## transformed
+y.fit = glm.kag.tran$fitted.values ##
+y.fit = as.factor(as.numeric(y.fit>0.5))
+confusionMatrix(y.train, y.fit)
+```
+
+#### Performance on test set
+
+```{r}
+## original
+X1.mean = X.test[,1]; X2.mean = X.test[,2]; X3.mean = X.test[,3]; X4.mean = X.test[,4]; X5.mean = X.test[,5]; X6.mean = X.test[,6]; X7.mean = X.test[,7]; X8.mean = X.test[,8]; X9.mean = X.test[,9]; X10.mean = X.test[,10]; X11.mean = X.test[,11]; X12.mean = X.test[,12]; X13.mean = X.test[,13]
+
+X1.sd = X.test[,14]; X2.sd = X.test[,15]; X3.sd = X.test[,16]; X4.sd = X.test[,17]; X5.sd = X.test[,18]; X6.sd = X.test[,19]; X7.sd = X.test[,20]; X8.sd = X.test[,21]; X9.sd = X.test[,22]; X10.sd = X.test[,23]; X11.sd = X.test[,24]; X12.sd = X.test[,25]; X13.sd = X.test[,26]
+
+## model: glm.kag
+y.pred = predict.glm(glm.kag, 
+                     data.frame(X1.mean, X2.mean, X3.mean, X4.mean, 
+                                X5.mean, X6.mean, X7.mean, X8.mean, X9.mean,
+                                X10.mean, X11.mean, X12.mean, X13.mean,
+                                X1.sd, X2.sd, X3.sd, X4.sd, X5.sd, X6.sd,
+                                X7.sd, X8.sd, X9.sd, X10.sd, X11.sd, X12.sd,
+                                X13.sd), type="response")
+
+y.pred = as.factor(as.numeric(y.pred>0.5))
+confusionMatrix(y.test, y.pred)
+
+##################################
+##################################
+
+## transformed
+X1.mean = A.test[,1]; X2.mean = A.test[,2]; X3.mean = A.test[,3]; X4.mean = A.test[,4]; X5.mean = A.test[,5]; X6.mean = A.test[,6]; X7.mean = A.test[,7]; X8.mean = A.test[,8]; X9.mean = A.test[,9]; X10.mean = A.test[,10]; X11.mean = A.test[,11]; X12.mean = A.test[,12]; X13.mean = A.test[,13]
+
+X1.sd = A.test[,14]; X2.sd = A.test[,15]; X3.sd = A.test[,16]; X4.sd = A.test[,17]; X5.sd = A.test[,18]; X6.sd = A.test[,19]; X7.sd = A.test[,20]; X8.sd = A.test[,21]; X9.sd = A.test[,22]; X10.sd = A.test[,23]; X11.sd = A.test[,24]; X12.sd = A.test[,25]; X13.sd = A.test[,26]
+
+## model: glm.kag.tran
+y.pred = predict.glm(glm.kag.tran, 
+                     data.frame(X1.mean, X2.mean, X3.mean, X4.mean, 
+                                X5.mean, X6.mean, X7.mean, X8.mean, X9.mean,
+                                X10.mean, X11.mean, X12.mean, X13.mean,
+                                X1.sd, X2.sd, X3.sd, X4.sd, X5.sd, X6.sd,
+                                X7.sd, X8.sd, X9.sd, X10.sd, X11.sd, X12.sd,
+                                X13.sd), type="response")
+y.pred = as.factor(as.numeric(y.pred>0.5))
+confusionMatrix(y.test, y.pred)
+```
+
+#### LASSO selection
+
+```{r, fig.width = 6, fig.height = 4}
+set.seed(479)
+
+lambdas <- 10^seq(1, -3, by = -.05)
+#######################
+# # FIXME INTs
+# cv.lasso <- glinternet.cv(X.train, y.train, numLevels=rep(1,12), 
+#                           lambda = lambdas, family="binomial")
+# plot(cv.lasso)
+# (lambda_best = cv.lasso$lambdaHat)
+
+#######################
+# FIXME MEs
+lasso_reg <- cv.glmnet(X.train, y.train, alpha = 1, lambda = lambdas,
+                       standardize = F, nfolds = 20,
+                       family='binomial', type.measure='auc')
+plot(lasso_reg)
+(lambda_best <- lasso_reg$lambda.min)
+```
+
+#### LASSO best lambda
+
+```{r}
+########################
+# FIXME INTs:
+# lasso_model <- glinternet(X.train, y.train, numLevels=rep(1,26), 
+#                        lambda = lambda_best, family="binomial")
+
+########################
+# FIXME MEs:
+lasso_model <- glmnet(X.train, y.train, alpha = 1,
+                      lambda = lambda_best, standardize = F, ##FIXME
+                      family='binomial', type.measure='auc')
+########################
+
+predictions_train <- predict(lasso_model, s = lambda_best, X.train) ##newx
+y.fit = as.factor(as.numeric(predictions_train>0.5))
+confusionMatrix(y.train, y.fit)
+
+
+predictions_test <- predict(lasso_model, s = lambda_best, X.test) ##newx
+y.pred = as.factor(as.numeric(predictions_test>0.5))
+confusionMatrix(y.test, y.pred)
+
+# coef(lasso_model)
+```
+
+
+#### KNN with K-Fold CV
+
+```{r, fig.width = 6, fig.height = 4}
+set.seed(479)
+
+# run KNN:
+ctrl <- trainControl(method="cv",number = 20)
+dt = data.frame(X.train, y.train=as.factor(y.train))
+knnFit <- train(y.train ~ ., data=dt, method = "knn", trControl = ctrl,  
+                preProcess = c("center","scale"), tuneLength = 20)
+# preProcess = c("center","scale")
+knnFit
+
+#Plotting different k values against accuracy (based on repeated cross validation)
+plot(knnFit)
+
+
+knnFit$finalModel
+
+confusionMatrix(knnFit)
+```
+
+#### KNN on testing set
+
+```{r}
+knnPredict <- predict(knnFit, newdata = X.test)
+confusionMatrix(knnPredict, y.test)
+```
+
+#### validation on best model 
+
+```{r}
+## original
+X1.mean = X.valid[,1]; X2.mean = X.valid[,2]; X3.mean = X.valid[,3]; X4.mean = X.valid[,4]; X5.mean = X.valid[,5]; X6.mean = X.valid[,6]; X7.mean = X.valid[,7]; X8.mean = X.valid[,8]; X9.mean = X.valid[,9]; X10.mean = X.valid[,10]; X11.mean = X.valid[,11]; X12.mean = X.valid[,12]; X13.mean = X.valid[,13]
+
+X1.sd = X.valid[,14]; X2.sd = X.valid[,15]; X3.sd = X.valid[,16]; X4.sd = X.valid[,17]; X5.sd = X.valid[,18]; X6.sd = X.valid[,19]; X7.sd = X.valid[,20]; X8.sd = X.valid[,21]; X9.sd = X.valid[,22]; X10.sd = X.valid[,23]; X11.sd = X.valid[,24]; X12.sd = X.valid[,25]; X13.sd = X.valid[,26]
+
+
+## FIXME lasso INTs
+# y.pred = predict(lasso_model, s = lambda_best, X.valid) ##newx
+
+
+## model: lasso_model
+predictions_valid <- predict(lasso_model, s = lambda_best, X.valid) ##newx
+y.pred = as.factor(as.numeric(predictions_valid>0.5))
+confusionMatrix( y.pred, y.valid)
+
+#################################
+# y.pred = predict.glm(glm.kag, 
+#                      data.frame(X1.mean, X2.mean, X3.mean, X4.mean, 
+#                                 X5.mean, X6.mean, X7.mean, X8.mean, X9.mean,
+#                                 X10.mean, X11.mean, X12.mean, X13.mean,
+#                                 X1.sd, X2.sd, X3.sd, X4.sd, X5.sd, X6.sd,
+#                                 X7.sd, X8.sd, X9.sd, X10.sd, X11.sd, X12.sd,
+#                                 X13.sd), type="response")
+# y.pred = as.factor(as.numeric(y.pred>0.5))
+# confusionMatrix(y.pred, y.valid)
+##################################
+# knnPredict <- predict(knnFit, newdata = X.valid )
+# confusionMatrix(knnPredict, y.valid)
+```
+
+### Kaggle dataset: predict gender
+
+```{r, fig.width = 24, fig.height = 24}
+# # expand iris data frame for pairs plot
+# gg4 = makePairs(df.gen[,2:14])
+# 
+# # new data frame mega iris
+# mega_kag = data.frame(gg4$all, Gender=rep( as.factor(df.gen$gender), length=nrow(gg4$all)))
+# 
+# # pairs plot
+# ggplot(mega_kag, aes_string(x = "x", y = "y")) +
+#   facet_grid(xvar ~ yvar, scales = "free") +
+#   geom_point(aes(colour=Gender), na.rm = TRUE, alpha=0.5) +
+#   stat_density(aes(x = x, y = ..scaled.. * diff(range(x)) + min(x)),
+#                data = gg4$densities, position = "identity",
+#                colour = "grey20", geom = "line")
+
+```
+
+```{r, fig.width = 24, fig.height = 24}
+# # expand iris data frame for pairs plot
+# gg4 = makePairs(df.gen[,15:27])
+#  
+# # new data frame mega iris
+# mega_kag = data.frame(gg4$all, Gender=rep( as.factor(df.gen$gender), length=nrow(gg4$all)))
+#  
+# # pairs plot
+# ggplot(mega_kag, aes_string(x = "x", y = "y")) + 
+#   facet_grid(xvar ~ yvar, scales = "free") + 
+#   geom_point(aes(colour=Gender), na.rm = TRUE, alpha=0.5) + 
+#   stat_density(aes(x = x, y = ..scaled.. * diff(range(x)) + min(x)), 
+#                data = gg4$densities, position = "identity", 
+#                colour = "grey20", geom = "line")
+
+```
+
+```{r}
+# dataset: df.gen
+# variables: X1.mean, ..., X13.mean, X1.sd, ..., X13.sd
+
+## transformation
+# right-skewed: square root, cube root, and log
+skewness(log(df.gen$X1.sd))
+skewness(log(df.gen$X2.sd))
+skewness(log(df.gen$X3.sd))
+skewness(log(df.gen$X4.sd))
+skewness(log(df.gen$X5.sd))
+skewness(log(df.gen$X6.sd))
+skewness(log(df.gen$X7.sd))
+skewness(log(df.gen$X8.sd))
+skewness(log(df.gen$X9.sd))
+skewness(log(df.gen$X10.sd))
+skewness(log(df.gen$X11.sd))
+skewness(Math.cbrt(log(df.gen$X12.sd)))
+skewness(log(df.gen$X13.sd))
+
+
+
+df.gen.tran = df.gen
+df.gen.tran$X1.sd = log(df.gen$X1.sd)
+df.gen.tran$X2.sd = log(df.gen$X2.sd)
+df.gen.tran$X3.sd = log(df.gen$X3.sd)
+df.gen.tran$X4.sd = log(df.gen$X4.sd)
+df.gen.tran$X5.sd = log(df.gen$X5.sd)
+df.gen.tran$X6.sd = log(df.gen$X6.sd)
+df.gen.tran$X7.sd = log(df.gen$X7.sd)
+df.gen.tran$X8.sd = log(df.gen$X8.sd)
+df.gen.tran$X9.sd = log(df.gen$X9.sd)
+df.gen.tran$X10.sd = log(df.gen$X10.sd)
+df.gen.tran$X11.sd = log(df.gen$X11.sd)
+df.gen.tran$X12.sd = Math.cbrt(log(df.gen$X12.sd))
+df.gen.tran$X13.sd = log(df.gen$X13.sd)
+
+```
+
+
+#### Split Kaggle dataset: training, testing & validation sets
+
+```{r}
+set.seed(479)
+
+n = dim(df.gen)[1]
+
+# split data into training+testing & validation 8:2
+ind.trte <- createDataPartition(y = df.gen$gender, p = 0.8,list = FALSE)
+
+# split training+testing data into training & testing 8:2
+ind.tr <- createDataPartition(y = ind.trte, p = 0.8,list = FALSE)
+
+## prepare original data:
+# df.gen
+X = as.matrix(df.gen[,2:27])
+y = ifelse(df.gen[,'gender']=="male", 1, 0)
+y = as.factor(y)
+
+X.trte <- X[ind.trte,]
+y.trte <- y[ind.trte]
+X.valid <- X[-ind.trte,]
+y.valid <- y[-ind.trte]
+
+X.train <- X.trte[ind.tr,]
+y.train <- y.trte[ind.tr]
+X.test <- X.trte[-ind.tr,]
+y.test <- y.trte[-ind.tr]
+
+## prepare normalized + transformed data:
+# df.gen.tran
+A = as.matrix(df.gen.tran[,2:27]) ##
+
+A.trte = A[ind.trte,]
+A.valid = A[-ind.trte,]
+
+A.train = A.trte[ind.tr,]
+A.test = A.trte[-ind.tr,]
+```
+
+#### glm on training data
+
+```{r}
+## original data df.gen
+X1.mean = X.train[,1]; X2.mean = X.train[,2]; X3.mean = X.train[,3]; X4.mean = X.train[,4]; X5.mean = X.train[,5]; X6.mean = X.train[,6]; X7.mean = X.train[,7]; X8.mean = X.train[,8]; X9.mean = X.train[,9]; X10.mean = X.train[,10]; X11.mean = X.train[,11]; X12.mean = X.train[,12]; X13.mean = X.train[,13]
+
+X1.sd = X.train[,14]; X2.sd = X.train[,15]; X3.sd = X.train[,16]; X4.sd = X.train[,17]; X5.sd = X.train[,18]; X6.sd = X.train[,19]; X7.sd = X.train[,20]; X8.sd = X.train[,21]; X9.sd = X.train[,22]; X10.sd = X.train[,23]; X11.sd = X.train[,24]; X12.sd = X.train[,25]; X13.sd = X.train[,26]
+
+# FIXME add some INTs
+# glm.kag = glm(y.train ~ X1.mean*X1.sd + X2.mean*X2.sd + X3.mean*X3.sd +
+#                 X4.mean*X4.sd + X5.mean*X5.sd + X6.mean*X6.sd +
+#                 X7.mean*X7.sd + X8.mean*X8.sd + X9.mean*X9.sd + 
+#                 X10.mean*X10.sd + X11.mean*X11.sd + X12.mean*X12.sd + 
+#                 X13.mean*X13.sd, family=binomial)
+
+glm.kag = glm(y.train ~ X1.mean + X2.mean + X3.mean + X4.mean +
+                X5.mean + X6.mean + X7.mean + X8.mean + X9.mean +
+                X10.mean + X11.mean + X12.mean + X13.mean +
+                X1.sd + X2.sd + X3.sd + X4.sd + X5.sd + X6.sd +
+                X7.sd + X8.sd + X9.sd + X10.sd + X11.sd + X12.sd +
+                X13.sd, family=binomial)
+summary(glm.kag)
+```
+
+```{r}
+## tran data df.uci.tran
+X1.mean = A.train[,1]; X2.mean = A.train[,2]; X3.mean = A.train[,3]; X4.mean = A.train[,4]; X5.mean = A.train[,5]; X6.mean = A.train[,6]; X7.mean = A.train[,7]; X8.mean = A.train[,8]; X9.mean = A.train[,9]; X10.mean = A.train[,10]; X11.mean = A.train[,11]; X12.mean = A.train[,12]; X13.mean = A.train[,13]
+
+X1.sd = A.train[,14]; X2.sd = A.train[,15]; X3.sd = A.train[,16]; X4.sd = A.train[,17]; X5.sd = A.train[,18]; X6.sd = A.train[,19]; X7.sd = A.train[,20]; X8.sd = A.train[,21]; X9.sd = A.train[,22]; X10.sd = A.train[,23]; X11.sd = A.train[,24]; X12.sd = A.train[,25]; X13.sd = A.train[,26]
+
+glm.kag.tran = glm(y.train ~ X1.mean + X2.mean + X3.mean + X4.mean + 
+                X5.mean + X6.mean + X7.mean + X8.mean + X9.mean + 
+                X10.mean + X11.mean + X12.mean + X13.mean +
+                X1.sd + X2.sd + X3.sd + X4.sd + X5.sd + X6.sd +
+                X7.sd + X8.sd + X9.sd + X10.sd + X11.sd + X12.sd + 
+                X13.sd, family=binomial)
+summary(glm.kag.tran)
+```
+
+#### Training set misclassification error
+
+```{r}
+## original
+y.fit = glm.kag$fitted.values ##
+y.fit = as.factor(as.numeric(y.fit>0.5))
+confusionMatrix(y.fit, y.train)
+
+## transformed
+y.fit = glm.kag.tran$fitted.values ##
+y.fit = as.factor(as.numeric(y.fit>0.5))
+confusionMatrix(y.fit, y.train)
+
+```
+
+#### Performance on test set
+
+```{r}
+## original
+X1.mean = X.test[,1]; X2.mean = X.test[,2]; X3.mean = X.test[,3]; X4.mean = X.test[,4]; X5.mean = X.test[,5]; X6.mean = X.test[,6]; X7.mean = X.test[,7]; X8.mean = X.test[,8]; X9.mean = X.test[,9]; X10.mean = X.test[,10]; X11.mean = X.test[,11]; X12.mean = X.test[,12]; X13.mean = X.test[,13]
+
+X1.sd = X.test[,14]; X2.sd = X.test[,15]; X3.sd = X.test[,16]; X4.sd = X.test[,17]; X5.sd = X.test[,18]; X6.sd = X.test[,19]; X7.sd = X.test[,20]; X8.sd = X.test[,21]; X9.sd = X.test[,22]; X10.sd = X.test[,23]; X11.sd = X.test[,24]; X12.sd = X.test[,25]; X13.sd = X.test[,26]
+
+## model: glm.kag
+y.pred = predict.glm(glm.kag, 
+                     data.frame(X1.mean, X2.mean, X3.mean, X4.mean, 
+                                X5.mean, X6.mean, X7.mean, X8.mean, X9.mean,
+                                X10.mean, X11.mean, X12.mean, X13.mean,
+                                X1.sd, X2.sd, X3.sd, X4.sd, X5.sd, X6.sd,
+                                X7.sd, X8.sd, X9.sd, X10.sd, X11.sd, X12.sd,
+                                X13.sd), type="response")
+
+y.pred = as.factor(as.numeric(y.pred>0.5))
+confusionMatrix(y.pred, y.test)
+
+##################################
+##################################
+
+## transformed
+X1.mean = A.test[,1]; X2.mean = A.test[,2]; X3.mean = A.test[,3]; X4.mean = A.test[,4]; X5.mean = A.test[,5]; X6.mean = A.test[,6]; X7.mean = A.test[,7]; X8.mean = A.test[,8]; X9.mean = A.test[,9]; X10.mean = A.test[,10]; X11.mean = A.test[,11]; X12.mean = A.test[,12]; X13.mean = A.test[,13]
+
+X1.sd = A.test[,14]; X2.sd = A.test[,15]; X3.sd = A.test[,16]; X4.sd = A.test[,17]; X5.sd = A.test[,18]; X6.sd = A.test[,19]; X7.sd = A.test[,20]; X8.sd = A.test[,21]; X9.sd = A.test[,22]; X10.sd = A.test[,23]; X11.sd = A.test[,24]; X12.sd = A.test[,25]; X13.sd = A.test[,26]
+
+## model: glm.kag.tran
+y.pred = predict.glm(glm.kag.tran, 
+                     data.frame(X1.mean, X2.mean, X3.mean, X4.mean, 
+                                X5.mean, X6.mean, X7.mean, X8.mean, X9.mean,
+                                X10.mean, X11.mean, X12.mean, X13.mean,
+                                X1.sd, X2.sd, X3.sd, X4.sd, X5.sd, X6.sd,
+                                X7.sd, X8.sd, X9.sd, X10.sd, X11.sd, X12.sd,
+                                X13.sd), type="response")
+y.pred = as.factor(as.numeric(y.pred>0.5))
+confusionMatrix(y.pred, y.test)
+```
+
+#### LASSO selection
+
+```{r, fig.width = 6, fig.height = 4}
+set.seed(479)
+
+lambdas <- 10^seq(1, -3, by = -.05)
+#######################
+# # FIXME INTs
+# cv.lasso <- glinternet.cv(X.train, y.train, numLevels=rep(1,12), 
+#                           lambda = lambdas, family="binomial")
+# plot(cv.lasso)
+# (lambda_best = cv.lasso$lambdaHat)
+
+#######################
+
+# FIXME MEs
+lasso_reg <- cv.glmnet(X.train, y.train, alpha = 1, lambda = lambdas,
+                       standardize = T, nfolds = 20,
+                       family='binomial', type.measure='auc')
+plot(lasso_reg)
+(lambda_best <- lasso_reg$lambda.min)
+```
+
+#### LASSO best lambda
+
+```{r}
+########################
+# FIXME INTs:
+# lasso_model <- glinternet(X.train, y.train, numLevels=rep(1,26), 
+#                        lambda = lambda_best, family="binomial")
+
+########################
+# FIXME MEs:
+lasso_model <- glmnet(X.train, y.train, alpha = 1,
+                      lambda = lambda_best, standardize = T, ##FIXME
+                      family='binomial', type.measure='auc')
+########################
+
+predictions_train <- predict(lasso_model, s = lambda_best, X.train) ##newx
+y.fit = as.factor(as.numeric(predictions_train>0.5))
+confusionMatrix(y.fit, y.train)
+
+
+predictions_test <- predict(lasso_model, s = lambda_best, X.test) ##newx
+y.pred = as.factor(as.numeric(predictions_test>0.5))
+confusionMatrix(y.pred, y.test)
+
+# coef(lasso_model)
+```
+
+#### KNN with K-Fold CV 
+
+```{r, fig.width = 6, fig.height = 4}
+set.seed(479)
+
+# run KNN:
+ctrl <- trainControl(method="cv",number = 20)
+dt = data.frame(X.train, y.train=as.factor(y.train))
+knnFit <- train(y.train ~ ., data=dt, method = "knn", trControl = ctrl,   preProcess = c("center","scale"), tuneLength = 20)
+# preProcess = c("center","scale")
+knnFit
+
+#Plotting different k values against accuracy (based on repeated cross validation)
+plot(knnFit)
+
+
+knnFit$finalModel
+
+confusionMatrix(knnFit)
+```
+
+#### KNN on testing set
+
+```{r}
+knnPredict <- predict(knnFit, newdata = X.test)
+# Get the confusion matrix to see accuracy value and other parameter values
+confusionMatrix(knnPredict, as.factor(y.test))
+```
+
+#### validation on best model 
+
+```{r}
+## original
+X1.mean = X.valid[,1]; X2.mean = X.valid[,2]; X3.mean = X.valid[,3]; X4.mean = X.valid[,4]; X5.mean = X.valid[,5]; X6.mean = X.valid[,6]; X7.mean = X.valid[,7]; X8.mean = X.valid[,8]; X9.mean = X.valid[,9]; X10.mean = X.valid[,10]; X11.mean = X.valid[,11]; X12.mean = X.valid[,12]; X13.mean = X.valid[,13]
+
+X1.sd = X.valid[,14]; X2.sd = X.valid[,15]; X3.sd = X.valid[,16]; X4.sd = X.valid[,17]; X5.sd = X.valid[,18]; X6.sd = X.valid[,19]; X7.sd = X.valid[,20]; X8.sd = X.valid[,21]; X9.sd = X.valid[,22]; X10.sd = X.valid[,23]; X11.sd = X.valid[,24]; X12.sd = X.valid[,25]; X13.sd = X.valid[,26]
+
+
+## FIXME lasso INTs
+# y.pred = predict(lasso_model, s = lambda_best, X.valid) ##newx
+
+## model: glm.kag
+y.pred = predict.glm(glm.kag, 
+                     data.frame(X1.mean, X2.mean, X3.mean, X4.mean, 
+                                X5.mean, X6.mean, X7.mean, X8.mean, X9.mean,
+                                X10.mean, X11.mean, X12.mean, X13.mean,
+                                X1.sd, X2.sd, X3.sd, X4.sd, X5.sd, X6.sd,
+                                X7.sd, X8.sd, X9.sd, X10.sd, X11.sd, X12.sd,
+                                X13.sd), type="response")
+
+
+y.pred = as.factor(as.numeric(y.pred>0.5))
+confusionMatrix(y.pred, y.valid)
+
+##################################
+# knnPredict <- predict(knnFit, newdata = X.valid )
+# # Get the confusion matrix to see accuracy value and other parameter values
+# confusionMatrix(knnPredict, as.factor(y.valid) )
+# 
+# mean(knnPredict == y.valid)
+```
+
+
+\newpage
+
+# Appendix 2: Related Plots
+
+#### UCI dataset: 
+
+Features X1,...,X12; Response accent
+
+```{r, fig.width = 14, fig.height = 2}
+for(i in 1:6){
+  plot1 = ggplot(df.uci, aes(x = accent, y = df.uci[,i+1], fill=accent)) +
+    geom_boxplot() + theme_bw() + ylab(paste("X",i,sep="")) +
+    scale_color_brewer() + theme(legend.position = "none")
+
+  plot2 = ggplot(df.uci, aes(x = df.uci[,i+1], fill = accent)) +
+    geom_density(alpha = 0.7) + theme_bw() + xlab(paste("X",i,sep=""))
+  
+  plot3 = ggplot(df.uci, aes(x = accent, y = df.uci[,i+7], fill=accent)) +
+    geom_boxplot() + theme_bw() + ylab(paste("X",i+6,sep="")) +
+    scale_color_brewer() + theme(legend.position = "none")
+
+  plot4 = ggplot(df.uci, aes(x = df.uci[,i+7], fill = accent)) +
+    geom_density(alpha = 0.7) + theme_bw() + xlab(paste("X",i+6,sep=""))
+
+  grid.arrange(plot1, plot2, plot3, plot4, ncol=4)
+}
+```
+
+#### Kaggle dataset (filtered): 
+
+Features: X1,...,X12 (equivalent to UCI dataset, including MFCC #2 to #13); response: accent (equivalent to UCI dataset, which only has {ES, FR, GE, IT, UK, US})
+
+```{r, fig.width = 14, fig.height = 2}
+for(i in 1:13){
+  plot1 = ggplot(df.filter, aes(x = accent, y = df.filter[,i+1], fill=accent)) +
+    geom_boxplot() + theme_bw() + ylab(paste("mean.X",i,sep="")) +
+    scale_fill_brewer(palette="Accent") + theme(legend.position = "none")
+
+  plot2 = ggplot(df.filter, aes(x = df.filter[,i+1], fill = accent)) +
+    geom_density(alpha = 0.7) + theme_bw() + xlab(paste("mean.X",i,sep="")) +
+    scale_fill_brewer(palette="Accent")
+  
+  plot3 = ggplot(df.filter, aes(x = accent, y = df.filter[,i+14], fill=accent)) +
+    geom_boxplot() + theme_bw() + ylab(paste("sd.X",i,sep="")) +
+    scale_fill_brewer(palette="Accent") + theme(legend.position = "none")
+
+  plot4 = ggplot(df.filter, aes(x = df.filter[,i+14], fill = accent)) +
+    geom_density(alpha = 0.7) + theme_bw() + xlab(paste("sd.X",i,sep="")) +
+    scale_fill_brewer(palette="Accent")
+
+  grid.arrange(plot1, plot2, plot3, plot4, ncol=4)
+}
+```
+
+#### Kaggle dataset (full): 
+
+Features: means & standard deviations of X1,...,X13: Response: accent
+
+```{r, fig.width = 14, fig.height = 2}
+for(i in 1:13){
+  plot1 = ggplot(df.mfcc13, aes(x = accent, y = df.mfcc13[,i+1], fill=accent)) +
+    geom_boxplot() + theme_bw() + ylab(paste("mean.X",i,sep="")) +
+    scale_fill_brewer(palette="Dark2") + theme(legend.position = "none")
+
+  plot2 = ggplot(df.mfcc13, aes(x = df.mfcc13[,i+1], fill = accent)) +
+    geom_density(alpha = 0.7) + theme_bw() + xlab(paste("mean.X",i,sep="")) +
+    scale_fill_brewer(palette="Dark2")
+
+  plot3 = ggplot(df.mfcc13, aes(x = accent, y = df.mfcc13[,i+14], fill=accent)) +
+    geom_boxplot() + theme_bw() + ylab(paste("sd.X",i,sep="")) +
+    scale_fill_brewer(palette="Dark2") + theme(legend.position = "none")
+
+  plot4 = ggplot(df.mfcc13, aes(x = df.mfcc13[,i+14], fill = accent)) +
+    geom_density(alpha = 0.7) + theme_bw() + xlab(paste("sd.X",i,sep="")) +
+    scale_fill_brewer(palette="Dark2")
+
+  grid.arrange(plot1, plot2, plot3, plot4, ncol=4)
+}
+```
+
+#### Kaggle dataset (full):
+
+Features: means & standard deviations of X1,...,X13: Response: gender
+
+```{r, fig.width = 14, fig.height = 2}
+for(i in 1:13){
+  plot1 = ggplot(df.gen, aes(x = gender, y = df.gen[,i+1], fill=gender)) +
+    geom_boxplot() + theme_bw() + ylab(paste("mean.X",i,sep="")) +
+    scale_fill_brewer(palette="Pastel1") + theme(legend.position = "none")
+
+  plot2 = ggplot(df.gen, aes(x = df.gen[,i+1], fill = gender)) +
+    geom_density(alpha = 0.7) + theme_bw() + xlab(paste("mean.X",i,sep="")) +
+    scale_fill_brewer(palette="Pastel1")
+
+  plot3 = ggplot(df.gen, aes(x = gender, y = df.gen[,i+14], fill=gender)) +
+    geom_boxplot() + theme_bw() + ylab(paste("sd.X",i,sep="")) +
+    scale_fill_brewer(palette="Pastel1") + theme(legend.position = "none")
+
+  plot4 = ggplot(df.gen, aes(x = df.gen[,i+14], fill = gender)) +
+    geom_density(alpha = 0.7) + theme_bw() + xlab(paste("sd.X",i,sep="")) +
+    scale_fill_brewer(palette="Pastel1")
+
+  grid.arrange(plot1, plot2, plot3, plot4, ncol=4)
+}
+```
+
